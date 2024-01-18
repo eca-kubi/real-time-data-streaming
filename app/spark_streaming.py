@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
 from pyspark.sql import SparkSession
@@ -10,7 +11,7 @@ from pyspark.sql.types import StructType, StructField, DoubleType, StringType
 logging.basicConfig(level=logging.INFO)
 
 # Get configuration params
-cassandra_contact_points = os.getenv('CASSANDRA_CONTACT_POINTS', 'kafka-broker').split(',')
+cassandra_contact_points = os.getenv('CASSANDRA_CONTACT_POINTS', 'cassandra').split(',')
 cassandra_username = os.getenv('CASSANDRA_USERNAME', 'cassandra')
 cassandra_password = os.getenv('CASSANDRA_PASSWORD')
 cassandra_host = os.getenv('CASSANDRA_HOST', 'cassandra')
@@ -65,7 +66,7 @@ def transform_kafka_data(df, schema):
     parsed_df = json_df.select(from_json(col('value'), schema).alias('data'))
 
     # Change the column names to make it easier to work with the data
-    renamed_df = (parsed_df.select(col("data.time").alias("time"),
+    renamed_df = (parsed_df.select(col("data.time").alias("timestamp"),
                                    col("data.use [kW]").alias("use_kw"),
                                    col("data.gen [kW]").alias("gen_kw"),
                                    col("data.House overall [kW]").alias("house_overall_kw"),
@@ -105,8 +106,7 @@ def transform_kafka_data(df, schema):
 # noinspection SqlNoDataSourceInspection,SqlDialectInspection
 def prepare_cassandra_db():
     try:
-        auth_provider = PlainTextAuthProvider(username=cassandra_username, password=cassandra_password)
-        cluster = Cluster(contact_points=cassandra_contact_points, auth_provider=auth_provider)
+        cluster = Cluster([cassandra_host])
         session = cluster.connect()
 
         session.execute("""
@@ -114,8 +114,8 @@ def prepare_cassandra_db():
         """.format(cassandra_keyspace, int(cassandra_replication_factor)))
 
         session.execute("""
-        CREATE TABLE IF NOT EXISTS %s.%s (
-            time double PRIMARY KEY,
+        CREATE TABLE IF NOT EXISTS {}.{} (
+            timestamp double PRIMARY KEY,
             use_kw double,
             gen_kw double,
             house_overall_kw double,
@@ -148,7 +148,7 @@ def prepare_cassandra_db():
             dew_point double,
             precip_probability double
         )
-        """, (cassandra_keyspace, cassandra_table))
+        """.format(cassandra_keyspace, cassandra_table))
 
         logging.info(f"Keyspace {cassandra_keyspace} and table {cassandra_table} ready for data ingestion.")
         session.shutdown()
@@ -163,9 +163,10 @@ def create_spark_cassandra_connection():
         active_session = SparkSession.getActiveSession()
         s_conn = active_session if active_session else SparkSession.builder \
             .appName('IoT Data Processor') \
-            .config('spark.jars', '/opt/bitnami/spark/jars/spark-cassandra-connector_2.12-3.4.1.jar, /opt/bitnami/spark/jars/spark-sql-kafka-0-10_2.12-3.4.1.jar') \
             .config('spark.cassandra.connection.host', cassandra_host) \
             .config('spark.cassandra.connection.port', cassandra_port) \
+            .config('spark.jars.packages',
+                    'org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1,com.datastax.spark:spark-cassandra-connector_2.12:3.4.1,org.apache.spark:spark-sql_2.12:3.4.1') \
             .getOrCreate()
         s_conn.sparkContext.setLogLevel("WARN")
         logging.info("Spark connection created successfully!")
@@ -198,7 +199,7 @@ def create_stream_and_write_to_cassandra(spark_conn):
     if spark_df is None:
         logging.error("Kafka DataFrame is empty. Exiting...")
         return
-    
+
     # Perform transformations
     df_transformed = transform_kafka_data(spark_df, schema)
 
@@ -207,14 +208,16 @@ def create_stream_and_write_to_cassandra(spark_conn):
         .format("org.apache.spark.sql.cassandra") \
         .option("checkpointLocation", "/tmp/checkpoint") \
         .options(table=cassandra_table, keyspace=cassandra_keyspace) \
-        .outputMode("update") \
         .start()
 
 
 if __name__ == '__main__':
-    # Start the stream and await termination
-    spark_conn = create_spark_cassandra_connection()  # Assuming this function creates/connects to a SparkSession
     # Prepare Cassandra DB
     prepare_cassandra_db()
+
+    # Start the stream and await termination
+    spark_conn = create_spark_cassandra_connection()  # Assuming this function creates/connects to a SparkSession
+
     create_stream_and_write_to_cassandra(spark_conn)
+
     spark_conn.streams.awaitAnyTermination()
