@@ -189,4 +189,3 @@ services:
 
 networks:
   confluent:
-    external: true
