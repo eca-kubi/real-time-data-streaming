@@ -20,7 +20,7 @@ The architecture of the system is as follows:
 
 ## Getting Started
 
-To get started with this project, you will need to have Docker and Docker compose installed on your system.  Then, clone this repository and run the following command in the project directory:
+To get started with this project, you will need to have Docker and Docker compose installed on your system.  You also need to rename the `.env.example` file to `.env` and update the environment variables in the file. Then, clone this repository and run the following command in the project directory:
 
 ```bash
 docker-compose up -d
